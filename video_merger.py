@@ -955,29 +955,29 @@ def get_latest_date_folders_by_camera(cameras):
             logging.info(f"检查摄像头 {location}({camera_id}) 是否有当前日期 {current_date} 的视频")
         
             # 使用Path对象查找当前日期的文件夹
-        try:
+            try:
                 # 构建日期文件夹名称（前8位是日期，后2位是小时）
                 current_date_pattern = current_date + r'\d{2}'  # 例如：2025070200, 2025070201 等
                 date_pattern = re.compile(current_date_pattern)
             
-            # 确保路径存在
-            camera_path_obj = Path(camera_path)
-            if not camera_path_obj.exists():
-                logging.warning(f"摄像头路径不存在: {camera_path}")
-                continue
+                # 确保路径存在
+                camera_path_obj = Path(camera_path)
+                if not camera_path_obj.exists():
+                    logging.warning(f"摄像头路径不存在: {camera_path}")
+                    continue
                 
                 # 获取当前日期的文件夹
                 current_date_folders = [
-                folder.name for folder in camera_path_obj.iterdir() 
-                if folder.is_dir() and date_pattern.match(folder.name)
-            ]
+                    folder.name for folder in camera_path_obj.iterdir() 
+                    if folder.is_dir() and date_pattern.match(folder.name)
+                ]
             
                 if current_date_folders:
                     # 验证文件夹中有足够的视频文件
                     valid_folders = 0
                     for folder in current_date_folders:
-                    hour_folder_path = os.path.join(camera_path, folder)
-                    if os.path.isdir(hour_folder_path) and len(os.listdir(hour_folder_path)) >= 5:  # 至少有5个文件
+                        hour_folder_path = os.path.join(camera_path, folder)
+                        if os.path.isdir(hour_folder_path) and len(os.listdir(hour_folder_path)) >= 5:  # 至少有5个文件
                             valid_folders += 1
                     
                     if valid_folders > 0:
@@ -988,11 +988,11 @@ def get_latest_date_folders_by_camera(cameras):
                         logging.warning(f"摄像头 {location}({camera_id}) 找到日期 {current_date} 的文件夹但没有足够的视频文件")
                 else:
                     logging.warning(f"摄像头 {location}({camera_id}) 未找到当前日期 {current_date} 的文件夹")
-        except Exception as e:
-            logging.error(f"处理摄像头 {location}({camera_id}) 时出错: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-    
+            except Exception as e:
+                logging.error(f"处理摄像头 {location}({camera_id}) 时出错: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
+        
         # 如果找到了当前日期的视频，记录到结果中
         if has_current_date:
             camera_latest_dates[location] = current_date
@@ -1006,7 +1006,7 @@ def get_latest_date_folders_by_camera(cameras):
         # 检查是否所有必需的摄像头都有当前日期的视频
         if all(camera in camera_latest_dates for camera in required_cameras):
             logging.info(f"所有必需的摄像头 {required_cameras} 都有当前日期 {current_date} 的视频，可以开始合并")
-    else:
+        else:
             missing = required_cameras - set(found_locations)
             logging.warning(f"有 {len(missing)} 个必需的摄像头位置没有当前日期 {current_date} 的视频: {missing}")
     else:
