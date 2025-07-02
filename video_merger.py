@@ -13,6 +13,7 @@ import argparse
 import configparser
 import threading
 import signal
+import sys
 
 # 配置日志
 logging.basicConfig(
@@ -24,6 +25,34 @@ logging.basicConfig(
     ]
 )
 
+# 添加看门狗定时器类
+class WatchdogTimer:
+    def __init__(self, timeout, handler=None):
+        self.timeout = timeout
+        self.handler = handler or self._default_handler
+        self.timer = None
+        self.is_running = False
+
+    def _default_handler(self):
+        logging.critical("看门狗超时! 脚本执行时间过长，可能已卡死，强制退出...")
+        sys.exit(1)
+
+    def start(self):
+        self.reset()
+
+    def stop(self):
+        if self.timer:
+            self.timer.cancel()
+        self.is_running = False
+
+    def reset(self):
+        if self.timer:
+            self.timer.cancel()
+        self.is_running = True
+        self.timer = threading.Timer(self.timeout, self.handler)
+        self.timer.daemon = True  # 设置为守护线程，主线程退出时自动终止
+        self.timer.start()
+
 # 默认配置
 DEFAULT_CONFIG = {
     "video_root": r"C:\Users\Public\Videos",
@@ -31,7 +60,7 @@ DEFAULT_CONFIG = {
     "max_timeout": 1800,  # 合并超时时间(秒)，实际执行时会先用600秒，超时后再用剩余时间 
     "max_retries": 3,    # 合并失败最大重试次数
     "retry_delay": 5,    # 重试间隔(秒)
-    "scan_interval": 60,  # 扫描间隔(秒)，每分钟扫描一次
+    "scan_interval": 600,  # 扫描间隔(秒)，每10分钟扫描一次
     "min_valid_size": 1024,   # 有效文件最小大小(KB)
     "max_workers": 1,    # 并行处理摄像头数量
     "save_hourly": False,  # 是否保留小时视频(不删除)
@@ -893,40 +922,95 @@ def cleanup_merged_videos(config, processed):
         logging.warning(f"清理空文件夹时出错: {e}")
 
 def get_latest_date_folders_by_camera(cameras):
-    """获取每个摄像头最新的日期文件夹"""
+    """获取每个摄像头当前日期的文件夹"""
     camera_latest_dates = {}
     required_cameras = set(['收银台', '熨烫机', '转角', '门口'])
     current_date = datetime.datetime.now().strftime("%Y%m%d")
     
-    # 获取当前日期
+    # 按摄像头位置分组
+    cameras_by_location = {}
     for camera in cameras:
         location = camera["location"]
-        camera_id = camera["camera_id"]
-        camera_path = camera["path"]
+        if location in required_cameras:
+            if location not in cameras_by_location:
+                cameras_by_location[location] = []
+            cameras_by_location[location].append(camera)
+    
+    # 检查是否所有必需的摄像头都被找到
+    for required_loc in required_cameras:
+        if required_loc not in cameras_by_location:
+            logging.warning(f"缺少必需的摄像头位置: {required_loc}")
+    
+    # 处理每个位置的摄像头
+    for location, location_cameras in cameras_by_location.items():
+        logging.info(f"检查位置 {location} 的 {len(location_cameras)} 个摄像头是否有当前日期 {current_date} 的视频")
         
-        if location not in required_cameras:
-            continue
+        # 检查该位置是否有当前日期的视频
+        has_current_date = False
         
-        # 使用Path对象和通配符查找日期文件夹
-        date_pattern = re.compile(r'\d{10}')
-        date_folders = [
-            folder.name for folder in Path(camera_path).iterdir() 
-            if folder.is_dir() and date_pattern.match(folder.name)
-        ]
+        for camera in location_cameras:
+            camera_id = camera["camera_id"]
+            camera_path = camera["path"]
         
-        # 按日期排序
-        date_folders.sort(reverse=True)  # 降序，最新日期在前
+            logging.info(f"检查摄像头 {location}({camera_id}) 是否有当前日期 {current_date} 的视频")
         
-        # 查找最新的非当天日期
-        for folder in date_folders:
-            folder_date = get_date_from_folder(folder)
-            if not folder_date:
-                continue
-            folder_day = folder_date.strftime("%Y%m%d")
+            # 使用Path对象查找当前日期的文件夹
+        try:
+                # 构建日期文件夹名称（前8位是日期，后2位是小时）
+                current_date_pattern = current_date + r'\d{2}'  # 例如：2025070200, 2025070201 等
+                date_pattern = re.compile(current_date_pattern)
             
-            if folder_day != current_date:  # 跳过当天的视频
-                camera_latest_dates[location] = folder_day
-                break
+            # 确保路径存在
+            camera_path_obj = Path(camera_path)
+            if not camera_path_obj.exists():
+                logging.warning(f"摄像头路径不存在: {camera_path}")
+                continue
+                
+                # 获取当前日期的文件夹
+                current_date_folders = [
+                folder.name for folder in camera_path_obj.iterdir() 
+                if folder.is_dir() and date_pattern.match(folder.name)
+            ]
+            
+                if current_date_folders:
+                    # 验证文件夹中有足够的视频文件
+                    valid_folders = 0
+                    for folder in current_date_folders:
+                    hour_folder_path = os.path.join(camera_path, folder)
+                    if os.path.isdir(hour_folder_path) and len(os.listdir(hour_folder_path)) >= 5:  # 至少有5个文件
+                            valid_folders += 1
+                    
+                    if valid_folders > 0:
+                        logging.info(f"摄像头 {location}({camera_id}) 找到当前日期 {current_date} 的有效视频目录: {valid_folders} 个")
+                        has_current_date = True
+                        break  # 一个摄像头有当前日期的视频就足够了
+                    else:
+                        logging.warning(f"摄像头 {location}({camera_id}) 找到日期 {current_date} 的文件夹但没有足够的视频文件")
+                else:
+                    logging.warning(f"摄像头 {location}({camera_id}) 未找到当前日期 {current_date} 的文件夹")
+        except Exception as e:
+            logging.error(f"处理摄像头 {location}({camera_id}) 时出错: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+    
+        # 如果找到了当前日期的视频，记录到结果中
+        if has_current_date:
+            camera_latest_dates[location] = current_date
+            logging.info(f"位置 {location} 有当前日期 {current_date} 的视频")
+    
+    # 记录找到的当前日期视频的摄像头
+    if camera_latest_dates:
+        found_locations = list(camera_latest_dates.keys())
+        logging.info(f"有当前日期 {current_date} 视频的摄像头位置: {found_locations}")
+        
+        # 检查是否所有必需的摄像头都有当前日期的视频
+        if all(camera in camera_latest_dates for camera in required_cameras):
+            logging.info(f"所有必需的摄像头 {required_cameras} 都有当前日期 {current_date} 的视频，可以开始合并")
+    else:
+            missing = required_cameras - set(found_locations)
+            logging.warning(f"有 {len(missing)} 个必需的摄像头位置没有当前日期 {current_date} 的视频: {missing}")
+    else:
+        logging.warning(f"没有任何摄像头有当前日期 {current_date} 的视频")
     
     return camera_latest_dates
 
@@ -943,6 +1027,7 @@ def main():
     parser.add_argument("--auto-clean", action="store_true", help="自动清理无效记录（默认启用）", default=True)
     parser.add_argument("--cleanup-original", action="store_true", help="仅清理原始视频文件，不执行合并")
     parser.add_argument("--cleanup-merged", action="store_true", help="仅清理已合并的视频文件，不执行合并")
+    parser.add_argument("--watchdog-timeout", type=int, default=3600, help="看门狗超时时间(秒)，默认1小时")
     args = parser.parse_args()
     
     if args.config:
@@ -957,6 +1042,11 @@ def main():
         config["deep_check"] = True
         logging.info("已启用深度检查模式")
     
+    # 启动看门狗定时器，防止脚本卡死
+    watchdog = WatchdogTimer(args.watchdog_timeout)
+    watchdog.start()
+    logging.info(f"已启动看门狗定时器，超时时间: {args.watchdog_timeout} 秒")
+    
     logging.info("="*50)
     logging.info("开始视频合并处理")
     logging.info(f"配置: {json.dumps(config, ensure_ascii=False, indent=2)}")
@@ -966,6 +1056,7 @@ def main():
         subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except Exception:
         logging.error("ffmpeg未安装或不可用，请先安装ffmpeg并确保可以在命令行中使用")
+        watchdog.stop()
         return
     
     # 加载已处理记录
@@ -982,12 +1073,14 @@ def main():
     if args.cleanup_original:
         logging.info("仅执行原始视频清理...")
         cleanup_original_videos(config, processed)
+        watchdog.stop()
         return
         
     # 如果只需要清理已合并视频，则执行清理后退出
     if args.cleanup_merged:
         logging.info("仅执行已合并视频清理...")
         cleanup_merged_videos(config, processed)
+        watchdog.stop()
         return
     
     # 每次执行前都验证已处理记录
@@ -1048,6 +1141,7 @@ def main():
     # 如果只是验证记录，则退出
     if args.verify_only:
         logging.info("验证完成，退出")
+        watchdog.stop()
         return
     
     # 执行原始视频清理
@@ -1058,11 +1152,13 @@ def main():
     
     run_forever = not args.single_run
     required_cameras = set(['收银台', '熨烫机', '转角', '门口'])
-    last_processed_date = None
     is_processing = False
     
     while True:
         try:
+            # 重置看门狗定时器
+            watchdog.reset()
+            
             # 如果当前没有正在处理的任务，则检查是否有新的日期需要处理
             if not is_processing:
                 # 扫描摄像头文件夹
@@ -1070,65 +1166,89 @@ def main():
                 
                 if not cameras:
                     logging.warning("未找到摄像头文件夹")
+                    if not run_forever:
+                        break
                     time.sleep(config["scan_interval"])
                     continue
                 
-                # 获取各个摄像头最新的日期文件夹
-                camera_latest_dates = get_latest_date_folders_by_camera(cameras)
+                # 打印找到的摄像头信息
+                found_cameras = [f"{c['location']}({c['camera_id']})" for c in cameras]
+                logging.info(f"找到摄像头: {found_cameras}")
                 
-                # 检查是否所有必需的摄像头都有相同的新日期
-                if len(camera_latest_dates) == len(required_cameras):
-                    # 所有摄像头都找到了日期文件夹
-                    dates = set(camera_latest_dates.values())
+                # 获取每个摄像头当天的日期文件夹
+                camera_dates = get_latest_date_folders_by_camera(cameras)
+                
+                # 检查是否所有必需的摄像头都有当前日期的视频
+                logging.info(f"当前必需的摄像头: {sorted(list(required_cameras))}")
+                logging.info(f"找到的摄像头当前日期视频: {camera_dates}")
+                
+                # 确认所有必需的摄像头都有当天视频
+                all_cameras_present = all(camera in camera_dates for camera in required_cameras)
+                if not all_cameras_present:
+                    missing_cameras = required_cameras - set(camera_dates.keys())
+                    logging.warning(f"有 {len(missing_cameras)} 个摄像头没有当前日期的视频: {missing_cameras}")
+                    if not run_forever:
+                        break
+                    time.sleep(config["scan_interval"])
+                    continue
                     
-                    if len(dates) == 1:
-                        new_date = next(iter(dates))
-                        # 检查是否是新的日期（与上次处理的不同）
-                        if new_date != last_processed_date:
-                            logging.info(f"发现所有摄像头都有新的日期: {new_date}")
-                            
-                            # 开始处理
-                            is_processing = True
-                            start_time = time.time()
-                            
-                            # 强制串行处理每个摄像头
-                            for camera in cameras:
-                                location = camera["location"]
-                                if location in required_cameras:
-                                    process_camera(camera, config, processed)
-                            
-                            elapsed_time = time.time() - start_time
-                            logging.info(f"本轮处理完成，耗时: {elapsed_time:.1f} 秒")
-                            
-                            # 每轮处理完成后，执行原始视频和合并视频清理
-                            cleanup_original_videos(config, processed)
-                            cleanup_merged_videos(config, processed)
-                            
-                            # 更新最后处理的日期
-                            last_processed_date = new_date
-                            is_processing = False
-                        else:
-                            logging.info(f"所有摄像头的最新日期 {new_date} 已经处理过，等待新的日期")
-                    else:
-                        logging.info(f"摄像头日期不一致，等待所有摄像头都有相同的日期。当前日期: {camera_latest_dates}")
-                else:
-                    missing_cameras = required_cameras - set(camera_latest_dates.keys())
-                    logging.info(f"部分摄像头未找到有效日期: {missing_cameras}")
+                # 所有摄像头都有当前日期的视频，开始处理
+                logging.info(f"所有必需的摄像头都有当前日期的视频，开始处理")
+                current_date = datetime.datetime.now().strftime("%Y%m%d")
+                
+                # 开始处理
+                is_processing = True
+                start_time = time.time()
+                
+                # 强制串行处理每个摄像头
+                for camera in cameras:
+                    # 重置看门狗定时器，防止长时间处理导致超时
+                    watchdog.reset()
+                    
+                    location = camera["location"]
+                    if location in required_cameras:
+                        process_camera(camera, config, processed)
+                
+                elapsed_time = time.time() - start_time
+                logging.info(f"本轮处理完成，耗时: {elapsed_time:.1f} 秒")
+                
+                # 每轮处理完成后，执行原始视频和合并视频清理
+                cleanup_original_videos(config, processed)
+                cleanup_merged_videos(config, processed)
+                
+                is_processing = False
             
             if not run_forever:
                 break
                 
             # 等待下一次扫描
             logging.info(f"等待 {config['scan_interval']} 秒后再次扫描...")
-            time.sleep(config["scan_interval"])
             
+            # 分段休眠，每30秒重置一次看门狗定时器，防止长时间休眠导致程序被误判为卡死
+            remaining_sleep = config["scan_interval"]
+            while remaining_sleep > 0:
+                sleep_time = min(30, remaining_sleep)
+                time.sleep(sleep_time)
+                remaining_sleep -= sleep_time
+                watchdog.reset()
+            
+        except KeyboardInterrupt:
+            logging.info("接收到中断信号，程序退出...")
+            watchdog.stop()
+            return
         except Exception as e:
             logging.error(f"处理发生错误: {e}")
+            import traceback
+            logging.error(f"错误详情: {traceback.format_exc()}")
             is_processing = False  # 发生错误时重置处理状态
             time.sleep(60)  # 发生错误后，等待1分钟再重试
             if not run_forever:
                 break
             continue
+    
+    # 程序正常退出，停止看门狗定时器
+    watchdog.stop()
+    logging.info("程序正常退出")
 
 if __name__ == "__main__":
     main() 
